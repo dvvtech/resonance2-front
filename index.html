@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Resonance2</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+    <main class="shell">
+        <section class="panel hero">
+            <p class="eyebrow">Real-time Music Sync Rooms</p>
+            <h1>Resonance2</h1>
+            <p class="lead">Создай комнату, отправь ссылку и синхронно управляй одним аудиоисточником на нескольких устройствах.</p>
+            <p class="hint">MVP использует прямые аудиоссылки: mp3, aac, ogg, HLS/stream, если браузер умеет их воспроизводить.</p>
+        </section>
+
+        <section class="panel stack">
+            <div class="row responsive">
+                <button id="createRoomButton" class="accent">Создать комнату</button>
+                <input id="roomIdInput" type="text" placeholder="Room ID">
+                <button id="joinRoomButton">Войти</button>
+            </div>
+
+            <div class="row responsive">
+                <input id="shareLinkInput" type="text" readonly placeholder="Ссылка на комнату появится здесь">
+                <button id="copyLinkButton">Копировать ссылку</button>
+            </div>
+
+            <div class="row responsive">
+                <input id="trackUrlInput" type="url" placeholder="Прямая ссылка на аудио или поток">
+                <button id="setTrackButton">Установить трек</button>
+            </div>
+
+            <div class="row controls">
+                <button id="playButton">Play</button>
+                <button id="pauseButton">Pause</button>
+                <input id="seekInput" type="number" min="0" step="0.1" value="0">
+                <button id="seekButton">Seek</button>
+            </div>
+
+            <audio id="audioPlayer" controls preload="auto"></audio>
+
+            <div class="status-grid">
+                <article class="status-card">
+                    <span class="label">Connection</span>
+                    <strong id="connectionState">Connecting...</strong>
+                </article>
+                <article class="status-card">
+                    <span class="label">Room</span>
+                    <strong id="currentRoom">-</strong>
+                </article>
+                <article class="status-card">
+                    <span class="label">Playback</span>
+                    <strong id="playbackState">Paused</strong>
+                </article>
+                <article class="status-card wide">
+                    <span class="label">Status</span>
+                    <strong id="statusText">Подключение к серверу...</strong>
+                </article>
+            </div>
+        </section>
+    </main>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.7/signalr.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="/app.js"></script>
+</body>
+</html>
