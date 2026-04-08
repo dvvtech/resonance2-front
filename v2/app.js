@@ -6,6 +6,7 @@ const SOFT_CORRECTION_THRESHOLD_SECONDS = 0.04;
 const FINE_CORRECTION_THRESHOLD_SECONDS = 0.012;
 const MAX_PLAYBACK_RATE_DELTA = 0.04;
 const BACKEND_STORAGE_KEY = "resonance2:v2:backend-base-url";
+const DEFAULT_BACKEND_BASE_URL = "https://api.cloud-platform.pro/resonance/";
 
 const elements = {
     backendUrlInput: document.getElementById("backendUrlInput"),
@@ -101,7 +102,7 @@ function ensureTrailingSlash(url) {
 
 function normalizeBackendBaseUrl(rawValue) {
     const trimmedValue = (rawValue || "").trim();
-    const fallback = ensureTrailingSlash(window.location.origin);
+    const fallback = DEFAULT_BACKEND_BASE_URL;
 
     if (!trimmedValue) {
         return fallback;
@@ -116,7 +117,7 @@ function getQueryParam(name) {
 
 function resolveBackendBaseUrl() {
     return normalizeBackendBaseUrl(
-        getQueryParam("backend") || window.localStorage.getItem(BACKEND_STORAGE_KEY) || window.location.origin,
+        getQueryParam("backend") || window.localStorage.getItem(BACKEND_STORAGE_KEY) || DEFAULT_BACKEND_BASE_URL,
     );
 }
 
@@ -150,7 +151,7 @@ function buildShareLink(roomId) {
     url.search = "";
     url.searchParams.set("room", roomId);
 
-    if (backendBaseUrl !== ensureTrailingSlash(window.location.origin)) {
+    if (backendBaseUrl !== DEFAULT_BACKEND_BASE_URL) {
         url.searchParams.set("backend", backendBaseUrl);
     }
 
@@ -165,7 +166,7 @@ function updateHistory() {
         url.searchParams.set("room", currentRoomId);
     }
 
-    if (backendBaseUrl !== ensureTrailingSlash(window.location.origin)) {
+    if (backendBaseUrl !== DEFAULT_BACKEND_BASE_URL) {
         url.searchParams.set("backend", backendBaseUrl);
     }
 
