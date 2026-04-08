@@ -1,4 +1,4 @@
-@import url("../styles.css");
+@import url("v1/styles.css");
 
 .v2-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
