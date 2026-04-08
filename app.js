@@ -22,7 +22,8 @@ const elements = {
 
 const audio = elements.audioPlayer;
 const connection = new signalR.HubConnectionBuilder()
-    .withUrl("http://localhost:5090/musicHub")
+    .withUrl("https://api.cloud-platform.pro/resonance/musicHub")
+    //.withUrl("http://localhost:5090/musicHub")
     .withAutomaticReconnect()
     .build();
 
