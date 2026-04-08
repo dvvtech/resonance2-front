@@ -113,6 +113,28 @@ function normalizeTime(value) {
     return Math.max(0, numeric);
 }
 
+async function copyText(text) {
+    if (navigator.clipboard?.writeText && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+    }
+
+    const fallbackInput = document.createElement("input");
+    fallbackInput.value = text;
+    fallbackInput.setAttribute("readonly", "");
+    fallbackInput.style.position = "fixed";
+    fallbackInput.style.top = "-1000px";
+    document.body.appendChild(fallbackInput);
+    fallbackInput.select();
+    fallbackInput.setSelectionRange(0, fallbackInput.value.length);
+
+    try {
+        return document.execCommand("copy");
+    } finally {
+        document.body.removeChild(fallbackInput);
+    }
+}
+
 function setAudioSource(trackUrl) {
     const nextTrackUrl = (trackUrl || "").trim();
 
@@ -443,8 +465,8 @@ elements.copyLinkButton.addEventListener("click", async () => {
         return;
     }
 
-    await navigator.clipboard.writeText(elements.shareLinkInput.value);
-    setStatus("Ссылка на комнату скопирована.");
+    const copied = await copyText(elements.shareLinkInput.value);
+    setStatus(copied ? "Ссылка на комнату скопирована." : "Не удалось скопировать ссылку автоматически.");
 });
 
 elements.setTrackButton.addEventListener("click", async () => {
