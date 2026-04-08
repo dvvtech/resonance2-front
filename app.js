@@ -9,6 +9,7 @@ const elements = {
     copyLinkButton: document.getElementById("copyLinkButton"),
     trackUrlInput: document.getElementById("trackUrlInput"),
     setTrackButton: document.getElementById("setTrackButton"),
+    readyButton: document.getElementById("readyButton"),
     playButton: document.getElementById("playButton"),
     pauseButton: document.getElementById("pauseButton"),
     seekInput: document.getElementById("seekInput"),
@@ -33,6 +34,9 @@ let pendingSeekTime = null;
 let pendingShouldPlay = false;
 let suppressPlayerEventsUntil = 0;
 let driftSyncHandle = null;
+let audioPrimed = false;
+let latestRoomState = null;
+let autoplayHintShown = false;
 
 function setStatus(message) {
     if (message) {
@@ -46,6 +50,11 @@ function setConnectionState(message) {
 
 function setPlaybackState(message) {
     elements.playbackState.textContent = message;
+}
+
+function setReadyState(isReady) {
+    audioPrimed = isReady;
+    elements.readyButton.textContent = isReady ? "Устройство готово" : "Готов слушать";
 }
 
 function suppressPlayerEvents(ms = 350) {
@@ -157,11 +166,22 @@ async function playLocalAudio() {
 
     pendingShouldPlay = true;
 
+    if (!audioPrimed) {
+        if (!autoplayHintShown) {
+            setStatus('На этом устройстве нажмите "Готов слушать", чтобы браузер разрешил воспроизведение.');
+            autoplayHintShown = true;
+        }
+
+        return;
+    }
+
     try {
         suppressPlayerEvents(500);
         await audio.play();
+        autoplayHintShown = false;
     } catch {
-        setStatus("Браузер заблокировал autoplay. Нажмите Play один раз на этом устройстве.");
+        setReadyState(false);
+        setStatus('Браузер заблокировал autoplay. Нажмите "Готов слушать" на этом устройстве.');
     }
 }
 
@@ -169,6 +189,8 @@ function applyRoomState(state, statusMessage = "") {
     if (!state) {
         return;
     }
+
+    latestRoomState = state;
 
     currentRoomId = state.roomId || currentRoomId;
     updateRoomUi(currentRoomId);
@@ -275,6 +297,54 @@ async function joinRoom(roomId) {
     updateRoomUi(currentRoomId);
     startDriftSync();
     setStatus(`Вы вошли в комнату ${normalizedRoomId}.`);
+}
+
+async function primeDeviceForPlayback() {
+    setReadyState(true);
+    autoplayHintShown = false;
+
+    if (!latestRoomState?.trackUrl) {
+        setStatus("Устройство готово. Как только хост задаст трек, воспроизведение сможет стартовать здесь.");
+        return;
+    }
+
+    seekAudio(latestRoomState.currentTime);
+
+    if (latestRoomState.isPlaying) {
+        try {
+            suppressPlayerEvents(700);
+            await audio.play();
+            setStatus("Устройство синхронизировано и готово слушать.");
+        } catch {
+            setReadyState(false);
+            setStatus('Браузер всё ещё блокирует звук. Нажмите "Готов слушать" ещё раз после загрузки трека.');
+        }
+
+        return;
+    }
+
+    if (audio.src) {
+        const previousMuted = audio.muted;
+        const previousTime = normalizeTime(audio.currentTime);
+
+        try {
+            audio.muted = true;
+            suppressPlayerEvents(700);
+            await audio.play();
+            audio.pause();
+            audio.currentTime = previousTime;
+            setStatus("Устройство готово. Следующий Play стартует автоматически.");
+        } catch {
+            setReadyState(false);
+            setStatus('Не удалось подготовить аудио. Нажмите "Готов слушать" ещё раз.');
+        } finally {
+            audio.muted = previousMuted;
+        }
+
+        return;
+    }
+
+    setStatus("Устройство готово.");
 }
 
 connection.on("RoomUpdated", (state) => {
@@ -392,6 +462,10 @@ elements.setTrackButton.addEventListener("click", async () => {
     await safeInvoke("SetTrack", currentRoomId, trackUrl);
 });
 
+elements.readyButton.addEventListener("click", async () => {
+    await primeDeviceForPlayback();
+});
+
 elements.playButton.addEventListener("click", async () => {
     if (!currentRoomId) {
         setStatus("Сначала войдите в комнату.");
@@ -420,6 +494,7 @@ elements.seekButton.addEventListener("click", async () => {
 });
 
 void (async function initialize() {
+    setReadyState(false);
     updateButtons();
 
     try {

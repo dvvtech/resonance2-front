@@ -132,6 +132,11 @@ button.accent {
     border-color: transparent;
 }
 
+button.accent-secondary {
+    background: linear-gradient(135deg, #0891b2, #155e75);
+    border-color: transparent;
+}
+
 .controls button {
     min-width: 110px;
 }
