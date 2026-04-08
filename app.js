@@ -1,4 +1,4 @@
-const DRIFT_THRESHOLD_SECONDS = 0.3;//
+const DRIFT_THRESHOLD_SECONDS = 0.3;
 const DRIFT_SYNC_INTERVAL_MS = 4000;
 
 const elements = {
