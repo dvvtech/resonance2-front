@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Resonance2 v2</title>
+    <link rel="stylesheet" href="../styles.css">
+    <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+    <main class="shell">
+        <section class="panel hero">
+            <p class="eyebrow">Resonance2 v2</p>
+            <h1>Clock-Synced Rooms</h1>
+            <p class="lead">Эта версия использует синхронизацию серверных часов, планируемые команды `play/seek` и мягкую коррекцию drift через `playbackRate`.</p>
+            <p class="hint">Если frontend живёт отдельно от backend, открой страницу с `?backend=https://your-api-base/` или введи backend URL ниже.</p>
+        </section>
+
+        <section class="panel stack">
+            <div class="row responsive">
+                <input id="backendUrlInput" type="url" placeholder="Backend base URL, например https://api.example.com/resonance/">
+                <button id="connectBackendButton">Подключить backend</button>
+            </div>
+
+            <div class="row responsive">
+                <button id="createRoomButton" class="accent">Создать комнату</button>
+                <input id="roomIdInput" type="text" placeholder="Room ID">
+                <button id="joinRoomButton">Войти</button>
+            </div>
+
+            <div class="row responsive">
+                <input id="shareLinkInput" type="text" readonly placeholder="Ссылка на комнату появится здесь">
+                <button id="copyLinkButton">Копировать ссылку</button>
+            </div>
+
+            <div class="row responsive">
+                <input id="trackUrlInput" type="url" placeholder="Прямая ссылка на аудио или поток">
+                <button id="setTrackButton">Установить трек</button>
+            </div>
+
+            <div class="row controls">
+                <button id="readyButton" class="accent-secondary">Готов слушать</button>
+            </div>
+
+            <audio id="audioPlayer" controls preload="auto"></audio>
+
+            <div class="status-grid v2-grid">
+                <article class="status-card">
+                    <span class="label">Connection</span>
+                    <strong id="connectionState">Disconnected</strong>
+                </article>
+                <article class="status-card">
+                    <span class="label">Room</span>
+                    <strong id="currentRoom">-</strong>
+                </article>
+                <article class="status-card">
+                    <span class="label">Clock Offset</span>
+                    <strong id="clockOffsetText">-</strong>
+                </article>
+                <article class="status-card">
+                    <span class="label">RTT</span>
+                    <strong id="rttText">-</strong>
+                </article>
+                <article class="status-card">
+                    <span class="label">Drift</span>
+                    <strong id="driftText">-</strong>
+                </article>
+                <article class="status-card">
+                    <span class="label">Sync Mode</span>
+                    <strong id="syncModeText">Idle</strong>
+                </article>
+                <article class="status-card">
+                    <span class="label">Playback</span>
+                    <strong id="playbackState">Paused</strong>
+                </article>
+                <article class="status-card">
+                    <span class="label">Backend</span>
+                    <strong id="backendState">-</strong>
+                </article>
+                <article class="status-card wide">
+                    <span class="label">Status</span>
+                    <strong id="statusText">Подготовка v2 клиента...</strong>
+                </article>
+            </div>
+        </section>
+    </main>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.7/signalr.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="./app.js"></script>
+</body>
+</html>

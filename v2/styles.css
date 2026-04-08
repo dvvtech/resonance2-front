@@ -1,0 +1,21 @@
+@import url("../styles.css");
+
+.v2-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.panel code {
+    color: #e9d5ff;
+}
+
+@media (max-width: 980px) {
+    .v2-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 760px) {
+    .v2-grid {
+        grid-template-columns: 1fr;
+    }
+}
