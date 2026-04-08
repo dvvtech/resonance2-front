@@ -10,10 +10,6 @@ const elements = {
     trackUrlInput: document.getElementById("trackUrlInput"),
     setTrackButton: document.getElementById("setTrackButton"),
     readyButton: document.getElementById("readyButton"),
-    playButton: document.getElementById("playButton"),
-    pauseButton: document.getElementById("pauseButton"),
-    seekInput: document.getElementById("seekInput"),
-    seekButton: document.getElementById("seekButton"),
     audioPlayer: document.getElementById("audioPlayer"),
     connectionState: document.getElementById("connectionState"),
     currentRoom: document.getElementById("currentRoom"),
@@ -95,13 +91,9 @@ function updateRoomUi(roomId) {
 
 function updateButtons() {
     const hasRoom = Boolean(currentRoomId);
-    const hasTrack = Boolean(currentTrackUrl);
 
     elements.copyLinkButton.disabled = !hasRoom;
     elements.setTrackButton.disabled = !hasRoom;
-    elements.playButton.disabled = !hasRoom || !hasTrack;
-    elements.pauseButton.disabled = !hasRoom || !hasTrack;
-    elements.seekButton.disabled = !hasRoom || !hasTrack;
 }
 
 function normalizeTime(value) {
@@ -159,7 +151,6 @@ function setAudioSource(trackUrl) {
 
 function seekAudio(timeInSeconds) {
     const nextTime = normalizeTime(timeInSeconds);
-    elements.seekInput.value = nextTime.toFixed(1);
 
     if (!audio.src) {
         return;
@@ -224,8 +215,6 @@ function applyRoomState(state, statusMessage = "") {
 
     if (sourceChanged || drift > DRIFT_THRESHOLD_SECONDS || !state.isPlaying) {
         seekAudio(targetTime);
-    } else {
-        elements.seekInput.value = targetTime.toFixed(1);
     }
 
     if (state.isPlaying && state.trackUrl) {
@@ -298,8 +287,6 @@ function startDriftSync() {
                 applyRoomState(state, drift > DRIFT_THRESHOLD_SECONDS ? "Drift скорректирован по серверу." : "");
                 return;
             }
-
-            elements.seekInput.value = normalizeTime(state.currentTime).toFixed(1);
         } catch (error) {
             const message = error?.message || "Не удалось обновить состояние комнаты.";
             setStatus(message);
@@ -486,33 +473,6 @@ elements.setTrackButton.addEventListener("click", async () => {
 
 elements.readyButton.addEventListener("click", async () => {
     await primeDeviceForPlayback();
-});
-
-elements.playButton.addEventListener("click", async () => {
-    if (!currentRoomId) {
-        setStatus("Сначала войдите в комнату.");
-        return;
-    }
-
-    await safeInvoke("Play", currentRoomId, normalizeTime(audio.currentTime));
-});
-
-elements.pauseButton.addEventListener("click", async () => {
-    if (!currentRoomId) {
-        setStatus("Сначала войдите в комнату.");
-        return;
-    }
-
-    await safeInvoke("Pause", currentRoomId);
-});
-
-elements.seekButton.addEventListener("click", async () => {
-    if (!currentRoomId) {
-        setStatus("Сначала войдите в комнату.");
-        return;
-    }
-
-    await safeInvoke("Seek", currentRoomId, normalizeTime(elements.seekInput.value));
 });
 
 void (async function initialize() {
