@@ -1,7 +1,16 @@
-const DRIFT_THRESHOLD_SECONDS = 0.3;
-const DRIFT_SYNC_INTERVAL_MS = 4000;
+const CLOCK_SYNC_SAMPLE_COUNT = 6;
+const CLOCK_SYNC_REFRESH_MS = 15000;
+const PLAYBACK_SYNC_INTERVAL_MS = 250;
+const HARD_SEEK_THRESHOLD_SECONDS = 0.18;
+const SOFT_CORRECTION_THRESHOLD_SECONDS = 0.04;
+const FINE_CORRECTION_THRESHOLD_SECONDS = 0.012;
+const MAX_PLAYBACK_RATE_DELTA = 0.04;
+const BACKEND_STORAGE_KEY = "resonance2:v2:backend-base-url";
+const DEFAULT_BACKEND_BASE_URL = "https://api.cloud-platform.pro/resonance/";
 
 const elements = {
+    backendUrlInput: document.getElementById("backendUrlInput"),
+    connectBackendButton: document.getElementById("connectBackendButton"),
     createRoomButton: document.getElementById("createRoomButton"),
     roomIdInput: document.getElementById("roomIdInput"),
     joinRoomButton: document.getElementById("joinRoomButton"),
@@ -13,26 +22,31 @@ const elements = {
     audioPlayer: document.getElementById("audioPlayer"),
     connectionState: document.getElementById("connectionState"),
     currentRoom: document.getElementById("currentRoom"),
+    clockOffsetText: document.getElementById("clockOffsetText"),
+    rttText: document.getElementById("rttText"),
+    driftText: document.getElementById("driftText"),
+    syncModeText: document.getElementById("syncModeText"),
     playbackState: document.getElementById("playbackState"),
+    backendState: document.getElementById("backendState"),
     statusText: document.getElementById("statusText"),
 };
 
 const audio = elements.audioPlayer;
-const connection = new signalR.HubConnectionBuilder()
-    .withUrl("https://api.cloud-platform.pro/resonance/musicHub")
-    //.withUrl("http://localhost:5090/musicHub")
-    .withAutomaticReconnect()
-    .build();
 
+let backendBaseUrl = "";
+let connection = null;
 let currentRoomId = "";
 let currentTrackUrl = "";
-let pendingSeekTime = null;
-let pendingShouldPlay = false;
-let suppressPlayerEventsUntil = 0;
-let driftSyncHandle = null;
-let audioPrimed = false;
 let latestRoomState = null;
+let suppressPlayerEventsUntil = 0;
+let pendingSeekTime = null;
+let audioPrimed = false;
 let autoplayHintShown = false;
+let clockOffsetMs = 0;
+let lastRttMs = null;
+let playbackSyncHandle = null;
+let clockSyncHandle = null;
+let pendingCommandHandle = null;
 
 function setStatus(message) {
     if (message) {
@@ -48,6 +62,10 @@ function setPlaybackState(message) {
     elements.playbackState.textContent = message;
 }
 
+function setSyncMode(message) {
+    elements.syncModeText.textContent = message;
+}
+
 function setReadyState(isReady) {
     audioPrimed = isReady;
     elements.readyButton.textContent = isReady ? "Устройство готово" : "Готов слушать";
@@ -61,39 +79,12 @@ function playerEventsSuppressed() {
     return Date.now() < suppressPlayerEventsUntil;
 }
 
-function getRoomIdFromLocation() {
-    const pathMatch = window.location.pathname.match(/^\/room\/([^/]+)$/i);
-    if (pathMatch?.[1]) {
-        return decodeURIComponent(pathMatch[1]).trim().toUpperCase();
-    }
-
-    const roomId = new URLSearchParams(window.location.search).get("room");
-    return roomId ? roomId.trim().toUpperCase() : "";
+function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-function buildShareLink(roomId) {
-    return `${window.location.origin}/?room=${encodeURIComponent(roomId)}`;
-}
-
-function updateRoomUi(roomId) {
-    elements.currentRoom.textContent = roomId || "-";
-    elements.roomIdInput.value = roomId || "";
-    elements.shareLinkInput.value = roomId ? buildShareLink(roomId) : "";
-
-    if (roomId) {
-        window.history.replaceState({}, "", `/?room=${encodeURIComponent(roomId)}`);
-    } else if (window.location.pathname !== "/" || window.location.search) {
-        window.history.replaceState({}, "", "/");
-    }
-
-    updateButtons();
-}
-
-function updateButtons() {
-    const hasRoom = Boolean(currentRoomId);
-
-    elements.copyLinkButton.disabled = !hasRoom;
-    elements.setTrackButton.disabled = !hasRoom;
+function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
 }
 
 function normalizeTime(value) {
@@ -103,6 +94,91 @@ function normalizeTime(value) {
     }
 
     return Math.max(0, numeric);
+}
+
+function ensureTrailingSlash(url) {
+    return url.endsWith("/") ? url : `${url}/`;
+}
+
+function normalizeBackendBaseUrl(rawValue) {
+    const trimmedValue = (rawValue || "").trim();
+    const fallback = DEFAULT_BACKEND_BASE_URL;
+
+    if (!trimmedValue) {
+        return fallback;
+    }
+
+    return ensureTrailingSlash(new URL(trimmedValue, window.location.origin).toString());
+}
+
+function getQueryParam(name) {
+    return new URLSearchParams(window.location.search).get(name) || "";
+}
+
+function resolveBackendBaseUrl() {
+    return normalizeBackendBaseUrl(
+        getQueryParam("backend") || window.localStorage.getItem(BACKEND_STORAGE_KEY) || DEFAULT_BACKEND_BASE_URL,
+    );
+}
+
+function getHubUrl() {
+    return new URL("musicHubV2", backendBaseUrl).toString();
+}
+
+function getEstimatedServerNowMs() {
+    return Date.now() + clockOffsetMs;
+}
+
+function updateMetrics(driftSeconds = null) {
+    elements.clockOffsetText.textContent = `${clockOffsetMs.toFixed(1)} ms`;
+    elements.rttText.textContent = lastRttMs === null ? "-" : `${lastRttMs.toFixed(0)} ms`;
+    elements.driftText.textContent = driftSeconds === null ? "-" : `${(driftSeconds * 1000).toFixed(0)} ms`;
+    elements.backendState.textContent = backendBaseUrl;
+}
+
+function updateButtons() {
+    const hasRoom = Boolean(currentRoomId);
+    elements.copyLinkButton.disabled = !hasRoom;
+    elements.setTrackButton.disabled = !hasRoom;
+}
+
+function getRoomIdFromLocation() {
+    return getQueryParam("room").trim().toUpperCase();
+}
+
+function buildShareLink(roomId) {
+    const url = new URL(window.location.href);
+    url.search = "";
+    url.searchParams.set("room", roomId);
+
+    if (backendBaseUrl !== DEFAULT_BACKEND_BASE_URL) {
+        url.searchParams.set("backend", backendBaseUrl);
+    }
+
+    return url.toString();
+}
+
+function updateHistory() {
+    const url = new URL(window.location.href);
+    url.search = "";
+
+    if (currentRoomId) {
+        url.searchParams.set("room", currentRoomId);
+    }
+
+    if (backendBaseUrl !== DEFAULT_BACKEND_BASE_URL) {
+        url.searchParams.set("backend", backendBaseUrl);
+    }
+
+    window.history.replaceState({}, "", url.toString());
+}
+
+function updateRoomUi(roomId) {
+    elements.currentRoom.textContent = roomId || "-";
+    elements.roomIdInput.value = roomId || "";
+    elements.shareLinkInput.value = roomId ? buildShareLink(roomId) : "";
+    updateButtons();
+    updateHistory();
 }
 
 async function copyText(text) {
@@ -141,6 +217,7 @@ function setAudioSource(trackUrl) {
         audio.pause();
         audio.removeAttribute("src");
         audio.load();
+        audio.playbackRate = 1;
         return true;
     }
 
@@ -153,6 +230,7 @@ function seekAudio(timeInSeconds) {
     const nextTime = normalizeTime(timeInSeconds);
 
     if (!audio.src) {
+        pendingSeekTime = nextTime;
         return;
     }
 
@@ -174,10 +252,8 @@ function seekAudio(timeInSeconds) {
 
 async function playLocalAudio() {
     if (!audio.src) {
-        return;
+        return false;
     }
-
-    pendingShouldPlay = true;
 
     if (!audioPrimed) {
         if (!autoplayHintShown) {
@@ -185,67 +261,370 @@ async function playLocalAudio() {
             autoplayHintShown = true;
         }
 
-        return;
+        return false;
     }
 
     try {
         suppressPlayerEvents(500);
         await audio.play();
         autoplayHintShown = false;
+        return true;
     } catch {
         setReadyState(false);
         setStatus('Браузер заблокировал autoplay. Нажмите "Готов слушать" на этом устройстве.');
+        return false;
     }
 }
 
-function applyRoomState(state, statusMessage = "") {
-    if (!state) {
+function normalizePendingCommand(rawCommand) {
+    if (!rawCommand) {
+        return null;
+    }
+
+    return {
+        type: rawCommand.type || "",
+        executeAtUnixMs: Number(rawCommand.executeAtUnixMs) || 0,
+        positionSeconds: normalizeTime(rawCommand.positionSeconds),
+        isPlayingAfterExecution: Boolean(rawCommand.isPlayingAfterExecution),
+        version: Number(rawCommand.version) || 0,
+    };
+}
+
+function normalizeRoomState(rawState) {
+    return {
+        roomId: rawState.roomId || "",
+        trackUrl: (rawState.trackUrl || "").trim(),
+        isPlaying: Boolean(rawState.isPlaying),
+        positionSeconds: normalizeTime(rawState.positionSeconds),
+        referenceServerTimeUnixMs: Number(rawState.referenceServerTimeUnixMs) || 0,
+        serverNowUnixMs: Number(rawState.serverNowUnixMs) || 0,
+        version: Number(rawState.version) || 0,
+        pendingCommand: normalizePendingCommand(rawState.pendingCommand),
+    };
+}
+
+function promotePendingCommandIfDue() {
+    if (!latestRoomState?.pendingCommand) {
+        return false;
+    }
+
+    if (getEstimatedServerNowMs() + 2 < latestRoomState.pendingCommand.executeAtUnixMs) {
+        return false;
+    }
+
+    latestRoomState = {
+        ...latestRoomState,
+        isPlaying: latestRoomState.pendingCommand.isPlayingAfterExecution,
+        positionSeconds: latestRoomState.pendingCommand.positionSeconds,
+        referenceServerTimeUnixMs: latestRoomState.pendingCommand.executeAtUnixMs,
+        version: Math.max(latestRoomState.version, latestRoomState.pendingCommand.version),
+        pendingCommand: null,
+    };
+
+    if (pendingCommandHandle) {
+        window.clearTimeout(pendingCommandHandle);
+        pendingCommandHandle = null;
+    }
+
+    return true;
+}
+
+function schedulePendingCommand() {
+    if (pendingCommandHandle) {
+        window.clearTimeout(pendingCommandHandle);
+        pendingCommandHandle = null;
+    }
+
+    if (!latestRoomState?.pendingCommand) {
         return;
     }
 
-    latestRoomState = state;
+    const delayMs = latestRoomState.pendingCommand.executeAtUnixMs - getEstimatedServerNowMs();
 
-    currentRoomId = state.roomId || currentRoomId;
-    updateRoomUi(currentRoomId);
+    if (delayMs <= 0) {
+        if (promotePendingCommandIfDue()) {
+            syncPlaybackToState(true);
+        }
 
-    const sourceChanged = setAudioSource(state.trackUrl);
-    const targetTime = normalizeTime(state.currentTime);
+        return;
+    }
+
+    pendingCommandHandle = window.setTimeout(() => {
+        if (promotePendingCommandIfDue()) {
+            syncPlaybackToState(true);
+        }
+    }, Math.max(0, delayMs - 8));
+}
+
+function getTargetPlayback(state) {
+    if (!state) {
+        return { shouldPlay: false, targetTime: 0 };
+    }
+
+    if (!state.isPlaying) {
+        return { shouldPlay: false, targetTime: state.positionSeconds };
+    }
+
+    const elapsedSeconds = Math.max(0, (getEstimatedServerNowMs() - state.referenceServerTimeUnixMs) / 1000);
+    return {
+        shouldPlay: true,
+        targetTime: state.positionSeconds + elapsedSeconds,
+    };
+}
+
+function syncPlaybackToState(forceHardSync = false) {
+    if (!latestRoomState) {
+        setSyncMode("Idle");
+        updateMetrics(null);
+        return;
+    }
+
+    promotePendingCommandIfDue();
+
+    const desired = getTargetPlayback(latestRoomState);
     const currentTime = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
-    const drift = Math.abs(currentTime - targetTime);
+    const driftSeconds = desired.targetTime - currentTime;
 
-    if (sourceChanged || drift > DRIFT_THRESHOLD_SECONDS || !state.isPlaying) {
-        seekAudio(targetTime);
+    updateMetrics(driftSeconds);
+
+    if (!latestRoomState.trackUrl) {
+        setPlaybackState("No track");
+        setSyncMode("Waiting track");
+        return;
     }
 
-    if (state.isPlaying && state.trackUrl) {
-        setPlaybackState(`Playing @ ${targetTime.toFixed(1)}s`);
-        void playLocalAudio();
+    if (!desired.shouldPlay) {
+        if (Math.abs(driftSeconds) > 0.05 || forceHardSync) {
+            seekAudio(desired.targetTime);
+        }
+
+        if (!audio.paused) {
+            suppressPlayerEvents();
+            audio.pause();
+        }
+
+        audio.playbackRate = 1;
+        setPlaybackState(`Paused @ ${desired.targetTime.toFixed(2)}s`);
+        setSyncMode(latestRoomState.pendingCommand ? `Waiting ${latestRoomState.pendingCommand.type}` : "Paused");
+        return;
+    }
+
+    if (Math.abs(driftSeconds) > HARD_SEEK_THRESHOLD_SECONDS || forceHardSync) {
+        seekAudio(desired.targetTime);
+        audio.playbackRate = 1;
+        setSyncMode("Hard seek");
+    } else if (Math.abs(driftSeconds) > SOFT_CORRECTION_THRESHOLD_SECONDS) {
+        const rateDelta = clamp(driftSeconds * 0.18, -MAX_PLAYBACK_RATE_DELTA, MAX_PLAYBACK_RATE_DELTA);
+        audio.playbackRate = 1 + rateDelta;
+        setSyncMode(`Rate ${(audio.playbackRate).toFixed(3)}x`);
+    } else if (Math.abs(driftSeconds) > FINE_CORRECTION_THRESHOLD_SECONDS) {
+        const rateDelta = clamp(driftSeconds * 0.08, -0.015, 0.015);
+        audio.playbackRate = 1 + rateDelta;
+        setSyncMode("Fine correction");
     } else {
-        pendingShouldPlay = false;
-        suppressPlayerEvents();
-        audio.pause();
-        setPlaybackState(`Paused @ ${targetTime.toFixed(1)}s`);
+        audio.playbackRate = 1;
+        setSyncMode("Locked");
     }
 
-    updateButtons();
+    setPlaybackState(`Playing @ ${desired.targetTime.toFixed(2)}s`);
+
+    if (audio.paused) {
+        void playLocalAudio();
+    }
+}
+
+function applyIncomingState(rawState, statusMessage = "") {
+    const nextState = normalizeRoomState(rawState);
+    if (latestRoomState && nextState.version < latestRoomState.version) {
+        return;
+    }
+
+    latestRoomState = nextState;
+    currentRoomId = nextState.roomId || currentRoomId;
+    updateRoomUi(currentRoomId);
+    elements.trackUrlInput.value = nextState.trackUrl || "";
+
+    const sourceChanged = setAudioSource(nextState.trackUrl);
+    schedulePendingCommand();
+    syncPlaybackToState(sourceChanged);
 
     if (statusMessage) {
         setStatus(statusMessage);
     }
 }
 
-async function ensureConnection() {
-    if (connection.state === signalR.HubConnectionState.Connected) {
+async function primeDeviceForPlayback() {
+    setReadyState(true);
+    autoplayHintShown = false;
+
+    if (!audio.src) {
+        setStatus("Устройство готово. Трек можно запускать после его загрузки в комнату.");
         return;
     }
 
-    if (connection.state === signalR.HubConnectionState.Connecting || connection.state === signalR.HubConnectionState.Reconnecting) {
+    const previousMuted = audio.muted;
+    const previousTime = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+
+    try {
+        audio.muted = true;
+        suppressPlayerEvents(700);
+        await audio.play();
+        await sleep(60);
+        audio.pause();
+        audio.currentTime = previousTime;
+        setStatus("Устройство подготовлено к синхронному воспроизведению.");
+    } catch {
+        setReadyState(false);
+        setStatus('Не удалось подготовить аудио. Нажмите "Готов слушать" ещё раз.');
+        return;
+    } finally {
+        audio.muted = previousMuted;
+    }
+
+    syncPlaybackToState(true);
+}
+
+async function syncClock() {
+    if (!connection || connection.state !== signalR.HubConnectionState.Connected) {
         return;
     }
+
+    const samples = [];
+
+    for (let index = 0; index < CLOCK_SYNC_SAMPLE_COUNT; index += 1) {
+        const clientSendUnixMs = Date.now();
+        const response = await connection.invoke("SyncClock", clientSendUnixMs);
+        const clientReceiveUnixMs = Date.now();
+        const roundTripMs = clientReceiveUnixMs - clientSendUnixMs;
+        const midpointServerMs = (Number(response.serverReceiveUnixMs) + Number(response.serverSendUnixMs)) / 2;
+        const midpointClientMs = (clientSendUnixMs + clientReceiveUnixMs) / 2;
+
+        samples.push({
+            offsetMs: midpointServerMs - midpointClientMs,
+            roundTripMs,
+        });
+
+        if (index < CLOCK_SYNC_SAMPLE_COUNT - 1) {
+            await sleep(80);
+        }
+    }
+
+    samples.sort((left, right) => left.roundTripMs - right.roundTripMs);
+    const bestSamples = samples.slice(0, Math.max(1, Math.ceil(samples.length / 2)));
+    clockOffsetMs = bestSamples.reduce((sum, sample) => sum + sample.offsetMs, 0) / bestSamples.length;
+    lastRttMs = bestSamples[0].roundTripMs;
+    updateMetrics(latestRoomState ? getTargetPlayback(latestRoomState).targetTime - (Number.isFinite(audio.currentTime) ? audio.currentTime : 0) : null);
+}
+
+function startClientLoops() {
+    if (playbackSyncHandle) {
+        window.clearInterval(playbackSyncHandle);
+    }
+
+    if (clockSyncHandle) {
+        window.clearInterval(clockSyncHandle);
+    }
+
+    playbackSyncHandle = window.setInterval(() => {
+        syncPlaybackToState(false);
+    }, PLAYBACK_SYNC_INTERVAL_MS);
+
+    clockSyncHandle = window.setInterval(() => {
+        void syncClock();
+    }, CLOCK_SYNC_REFRESH_MS);
+}
+
+function stopClientLoops() {
+    if (playbackSyncHandle) {
+        window.clearInterval(playbackSyncHandle);
+        playbackSyncHandle = null;
+    }
+
+    if (clockSyncHandle) {
+        window.clearInterval(clockSyncHandle);
+        clockSyncHandle = null;
+    }
+
+    if (pendingCommandHandle) {
+        window.clearTimeout(pendingCommandHandle);
+        pendingCommandHandle = null;
+    }
+}
+
+function bindConnectionEvents(activeConnection) {
+    activeConnection.on("RoomUpdated", (state) => {
+        applyIncomingState(state, `Комната ${state.roomId} синхронизирована через v2.`);
+    });
+
+    activeConnection.on("StateChanged", (state) => {
+        applyIncomingState(state, "Получено обновление состояния комнаты.");
+    });
+
+    activeConnection.onreconnecting(() => {
+        setConnectionState("Reconnecting...");
+        setStatus("Связь с backend переподключается...");
+    });
+
+    activeConnection.onreconnected(async () => {
+        setConnectionState("Connected");
+        setStatus("Связь восстановлена.");
+        await syncClock();
+
+        if (currentRoomId) {
+            await activeConnection.invoke("JoinRoom", currentRoomId);
+        }
+    });
+
+    activeConnection.onclose(() => {
+        setConnectionState("Disconnected");
+        setStatus("Соединение закрыто.");
+        stopClientLoops();
+    });
+}
+
+async function connectBackend() {
+    backendBaseUrl = normalizeBackendBaseUrl(elements.backendUrlInput.value || resolveBackendBaseUrl());
+    elements.backendUrlInput.value = backendBaseUrl;
+    window.localStorage.setItem(BACKEND_STORAGE_KEY, backendBaseUrl);
+    updateMetrics();
+    updateHistory();
+    stopClientLoops();
+
+    if (connection) {
+        try {
+            await connection.stop();
+        } catch {
+            // Ignore reconnect cleanup failures.
+        }
+    }
+var t = getHubUrl();
+    connection = new signalR.HubConnectionBuilder()
+        .withUrl(getHubUrl())
+        .withAutomaticReconnect()
+        .build();
+
+    bindConnectionEvents(connection);
 
     setConnectionState("Connecting...");
+    setStatus(`Подключение к ${getHubUrl()}...`);
     await connection.start();
     setConnectionState("Connected");
+    setStatus("Backend подключён.");
+
+    await syncClock();
+    startClientLoops();
+
+    if (currentRoomId) {
+        await connection.invoke("JoinRoom", currentRoomId);
+    }
+}
+
+async function ensureConnection() {
+    if (connection && connection.state === signalR.HubConnectionState.Connected) {
+        return;
+    }
+
+    await connectBackend();
 }
 
 async function safeInvoke(methodName, ...args) {
@@ -253,45 +632,10 @@ async function safeInvoke(methodName, ...args) {
         await ensureConnection();
         return await connection.invoke(methodName, ...args);
     } catch (error) {
-        const message = error?.message || "Ошибка SignalR.";
+        const message = error?.message || "Ошибка SignalR v2.";
         setStatus(message);
         throw error;
     }
-}
-
-function startDriftSync() {
-    if (driftSyncHandle) {
-        window.clearInterval(driftSyncHandle);
-    }
-
-    if (!currentRoomId) {
-        driftSyncHandle = null;
-        return;
-    }
-
-    driftSyncHandle = window.setInterval(async () => {
-        if (!currentRoomId || connection.state !== signalR.HubConnectionState.Connected) {
-            return;
-        }
-
-        try {
-            const state = await connection.invoke("GetRoomState", currentRoomId);
-            if (!state) {
-                return;
-            }
-
-            const currentTime = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
-            const drift = Math.abs(currentTime - normalizeTime(state.currentTime));
-
-            if (!state.isPlaying || drift > DRIFT_THRESHOLD_SECONDS) {
-                applyRoomState(state, drift > DRIFT_THRESHOLD_SECONDS ? "Drift скорректирован по серверу." : "");
-                return;
-            }
-        } catch (error) {
-            const message = error?.message || "Не удалось обновить состояние комнаты.";
-            setStatus(message);
-        }
-    }, DRIFT_SYNC_INTERVAL_MS);
 }
 
 async function joinRoom(roomId) {
@@ -304,102 +648,8 @@ async function joinRoom(roomId) {
     await safeInvoke("JoinRoom", normalizedRoomId);
     currentRoomId = normalizedRoomId;
     updateRoomUi(currentRoomId);
-    startDriftSync();
     setStatus(`Вы вошли в комнату ${normalizedRoomId}.`);
 }
-
-async function primeDeviceForPlayback() {
-    setReadyState(true);
-    autoplayHintShown = false;
-
-    if (!latestRoomState?.trackUrl) {
-        setStatus("Устройство готово. Как только хост задаст трек, воспроизведение сможет стартовать здесь.");
-        return;
-    }
-
-    seekAudio(latestRoomState.currentTime);
-
-    if (latestRoomState.isPlaying) {
-        try {
-            suppressPlayerEvents(700);
-            await audio.play();
-            setStatus("Устройство синхронизировано и готово слушать.");
-        } catch {
-            setReadyState(false);
-            setStatus('Браузер всё ещё блокирует звук. Нажмите "Готов слушать" ещё раз после загрузки трека.');
-        }
-
-        return;
-    }
-
-    if (audio.src) {
-        const previousMuted = audio.muted;
-        const previousTime = normalizeTime(audio.currentTime);
-
-        try {
-            audio.muted = true;
-            suppressPlayerEvents(700);
-            await audio.play();
-            audio.pause();
-            audio.currentTime = previousTime;
-            setStatus("Устройство готово. Следующий Play стартует автоматически.");
-        } catch {
-            setReadyState(false);
-            setStatus('Не удалось подготовить аудио. Нажмите "Готов слушать" ещё раз.');
-        } finally {
-            audio.muted = previousMuted;
-        }
-
-        return;
-    }
-
-    setStatus("Устройство готово.");
-}
-
-connection.on("RoomUpdated", (state) => {
-    applyRoomState(state, `Комната ${state.roomId} синхронизирована.`);
-});
-
-connection.on("TrackChanged", (state) => {
-    elements.trackUrlInput.value = state.trackUrl || "";
-    applyRoomState(state, "Трек обновлён для всех участников.");
-});
-
-connection.on("Play", (state) => {
-    applyRoomState(state, "Сервер запустил воспроизведение.");
-});
-
-connection.on("Pause", (state) => {
-    applyRoomState(state, "Сервер поставил воспроизведение на паузу.");
-});
-
-connection.on("Seek", (state) => {
-    applyRoomState(state, "Сервер обновил позицию трека.");
-});
-
-connection.onreconnecting(() => {
-    setConnectionState("Reconnecting...");
-    setStatus("Связь переподключается...");
-});
-
-connection.onreconnected(async () => {
-    setConnectionState("Connected");
-    setStatus("Связь восстановлена.");
-
-    if (currentRoomId) {
-        try {
-            await connection.invoke("JoinRoom", currentRoomId);
-            startDriftSync();
-        } catch (error) {
-            const message = error?.message || "Не удалось заново войти в комнату.";
-            setStatus(message);
-        }
-    }
-});
-
-connection.onclose(() => {
-    setConnectionState("Disconnected");
-});
 
 audio.addEventListener("loadedmetadata", () => {
     if (pendingSeekTime !== null) {
@@ -408,9 +658,7 @@ audio.addEventListener("loadedmetadata", () => {
         pendingSeekTime = null;
     }
 
-    if (pendingShouldPlay) {
-        void playLocalAudio();
-    }
+    syncPlaybackToState(true);
 });
 
 audio.addEventListener("play", async () => {
@@ -418,6 +666,7 @@ audio.addEventListener("play", async () => {
         return;
     }
 
+    setReadyState(true);
     await safeInvoke("Play", currentRoomId, normalizeTime(audio.currentTime));
 });
 
@@ -437,10 +686,14 @@ audio.addEventListener("seeked", async () => {
     await safeInvoke("Seek", currentRoomId, normalizeTime(audio.currentTime));
 });
 
+elements.connectBackendButton.addEventListener("click", async () => {
+    await connectBackend();
+});
+
 elements.createRoomButton.addEventListener("click", async () => {
     const roomId = await safeInvoke("CreateRoom");
     await joinRoom(roomId);
-    setStatus(`Комната ${roomId} создана.`);
+    setStatus(`Комната ${roomId} создана в v2.`);
 });
 
 elements.joinRoomButton.addEventListener("click", async () => {
@@ -453,7 +706,7 @@ elements.copyLinkButton.addEventListener("click", async () => {
     }
 
     const copied = await copyText(elements.shareLinkInput.value);
-    setStatus(copied ? "Ссылка на комнату скопирована." : "Не удалось скопировать ссылку автоматически.");
+    setStatus(copied ? "Ссылка на v2-комнату скопирована." : "Не удалось скопировать ссылку автоматически.");
 });
 
 elements.setTrackButton.addEventListener("click", async () => {
@@ -479,17 +732,23 @@ void (async function initialize() {
     setReadyState(false);
     updateButtons();
 
-    try {
-        await ensureConnection();
-        setStatus("Подключено. Создайте комнату или войдите по Room ID.");
+    backendBaseUrl = resolveBackendBaseUrl();
+    elements.backendUrlInput.value = backendBaseUrl;
+    updateMetrics();
 
+    try {
+        await connectBackend();
         const roomIdFromLocation = getRoomIdFromLocation();
+
         if (roomIdFromLocation) {
             await joinRoom(roomIdFromLocation);
+        } else {
+            setStatus("v2 клиент подключён. Создайте комнату или войдите по Room ID.");
         }
     } catch (error) {
-        const message = error?.message || "Не удалось подключиться к backend.";
+        const message = error?.message || "Не удалось подключиться к backend v2.";
         setConnectionState("Disconnected");
         setStatus(message);
+        stopClientLoops();
     }
 })();
