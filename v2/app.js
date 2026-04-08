@@ -597,7 +597,7 @@ async function connectBackend() {
             // Ignore reconnect cleanup failures.
         }
     }
-
+var t = getHubUrl();
     connection = new signalR.HubConnectionBuilder()
         .withUrl(getHubUrl())
         .withAutomaticReconnect()
