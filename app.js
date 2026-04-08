@@ -22,7 +22,7 @@ const elements = {
 
 const audio = elements.audioPlayer;
 const connection = new signalR.HubConnectionBuilder()
-    .withUrl("/musicHub")
+    .withUrl("http://localhost:5090/musicHub")
     .withAutomaticReconnect()
     .build();
 
@@ -66,7 +66,7 @@ function getRoomIdFromLocation() {
 }
 
 function buildShareLink(roomId) {
-    return `${window.location.origin}/room/${encodeURIComponent(roomId)}`;
+    return `${window.location.origin}/?room=${encodeURIComponent(roomId)}`;
 }
 
 function updateRoomUi(roomId) {
@@ -75,8 +75,8 @@ function updateRoomUi(roomId) {
     elements.shareLinkInput.value = roomId ? buildShareLink(roomId) : "";
 
     if (roomId) {
-        window.history.replaceState({}, "", `/room/${encodeURIComponent(roomId)}`);
-    } else if (window.location.pathname !== "/") {
+        window.history.replaceState({}, "", `/?room=${encodeURIComponent(roomId)}`);
+    } else if (window.location.pathname !== "/" || window.location.search) {
         window.history.replaceState({}, "", "/");
     }
 
