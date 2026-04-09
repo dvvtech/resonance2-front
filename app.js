@@ -1,10 +1,10 @@
-const CLOCK_SYNC_SAMPLE_COUNT = 6;
+const CLOCK_SYNC_SAMPLE_COUNT = 10;
 const CLOCK_SYNC_REFRESH_MS = 15000;
-const PLAYBACK_SYNC_INTERVAL_MS = 250;
-const HARD_SEEK_THRESHOLD_SECONDS = 0.18;
-const SOFT_CORRECTION_THRESHOLD_SECONDS = 0.04;
-const FINE_CORRECTION_THRESHOLD_SECONDS = 0.012;
-const MAX_PLAYBACK_RATE_DELTA = 0.04;
+const PLAYBACK_SYNC_INTERVAL_MS = 100;
+const HARD_SEEK_THRESHOLD_SECONDS = 0.15;
+const SOFT_CORRECTION_THRESHOLD_SECONDS = 0.035;
+const FINE_CORRECTION_THRESHOLD_SECONDS = 0.008;
+const MAX_PLAYBACK_RATE_DELTA = 0.035;
 const BACKEND_STORAGE_KEY = "resonance2:v2:backend-base-url";
 const DEFAULT_BACKEND_BASE_URL = "https://api.cloud-platform.pro/resonance/";
 
@@ -24,6 +24,7 @@ const elements = {
     currentRoom: document.getElementById("currentRoom"),
     clockOffsetText: document.getElementById("clockOffsetText"),
     rttText: document.getElementById("rttText"),
+    outputLatencyText: document.getElementById("outputLatencyText"),
     driftText: document.getElementById("driftText"),
     syncModeText: document.getElementById("syncModeText"),
     playbackState: document.getElementById("playbackState"),
@@ -44,6 +45,7 @@ let audioPrimed = false;
 let autoplayHintShown = false;
 let clockOffsetMs = 0;
 let lastRttMs = null;
+let audioOutputLatencyMs = 0;
 let playbackSyncHandle = null;
 let clockSyncHandle = null;
 let pendingCommandHandle = null;
@@ -129,9 +131,31 @@ function getEstimatedServerNowMs() {
     return Date.now() + clockOffsetMs;
 }
 
+function getAudioServerNowMs() {
+    return Date.now() + clockOffsetMs + audioOutputLatencyMs;
+}
+
+function detectAudioOutputLatency() {
+    try {
+        var AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextCtor) return;
+        var ctx = new AudioContextCtor();
+        var latencyMs = 0;
+        if ("outputLatency" in ctx) {
+            latencyMs += ctx.outputLatency * 1000;
+        }
+        if ("baseLatency" in ctx) {
+            latencyMs += ctx.baseLatency * 1000;
+        }
+        audioOutputLatencyMs = latencyMs;
+        ctx.close();
+    } catch {}
+}
+
 function updateMetrics(driftSeconds = null) {
     elements.clockOffsetText.textContent = `${clockOffsetMs.toFixed(1)} ms`;
     elements.rttText.textContent = lastRttMs === null ? "-" : `${lastRttMs.toFixed(0)} ms`;
+    elements.outputLatencyText.textContent = audioOutputLatencyMs > 0 ? `${audioOutputLatencyMs.toFixed(1)} ms` : "-";
     elements.driftText.textContent = driftSeconds === null ? "-" : `${(driftSeconds * 1000).toFixed(0)} ms`;
     elements.backendState.textContent = backendBaseUrl;
 }
@@ -308,7 +332,7 @@ function promotePendingCommandIfDue() {
         return false;
     }
 
-    if (getEstimatedServerNowMs() + 2 < latestRoomState.pendingCommand.executeAtUnixMs) {
+    if (getAudioServerNowMs() + 2 < latestRoomState.pendingCommand.executeAtUnixMs) {
         return false;
     }
 
@@ -339,7 +363,7 @@ function schedulePendingCommand() {
         return;
     }
 
-    const delayMs = latestRoomState.pendingCommand.executeAtUnixMs - getEstimatedServerNowMs();
+    var delayMs = latestRoomState.pendingCommand.executeAtUnixMs - getAudioServerNowMs();
 
     if (delayMs <= 0) {
         if (promotePendingCommandIfDue()) {
@@ -349,11 +373,35 @@ function schedulePendingCommand() {
         return;
     }
 
-    pendingCommandHandle = window.setTimeout(() => {
+    var BUSY_WAIT_MS = 5;
+
+    if (delayMs <= BUSY_WAIT_MS) {
+        var targetPerf = performance.now() + delayMs;
+        while (performance.now() < targetPerf) {}
         if (promotePendingCommandIfDue()) {
             syncPlaybackToState(true);
         }
-    }, Math.max(0, delayMs - 8));
+
+        return;
+    }
+
+    var coarseDelay = delayMs - BUSY_WAIT_MS;
+    pendingCommandHandle = window.setTimeout(() => {
+        var remaining = latestRoomState.pendingCommand.executeAtUnixMs - getAudioServerNowMs();
+        if (remaining <= 0) {
+            if (promotePendingCommandIfDue()) {
+                syncPlaybackToState(true);
+            }
+
+            return;
+        }
+
+        var targetPerf = performance.now() + remaining;
+        while (performance.now() < targetPerf) {}
+        if (promotePendingCommandIfDue()) {
+            syncPlaybackToState(true);
+        }
+    }, Math.max(0, coarseDelay));
 }
 
 function getTargetPlayback(state) {
@@ -365,7 +413,7 @@ function getTargetPlayback(state) {
         return { shouldPlay: false, targetTime: state.positionSeconds };
     }
 
-    const elapsedSeconds = Math.max(0, (getEstimatedServerNowMs() - state.referenceServerTimeUnixMs) / 1000);
+    const elapsedSeconds = Math.max(0, (getAudioServerNowMs() - state.referenceServerTimeUnixMs) / 1000);
     return {
         shouldPlay: true,
         targetTime: state.positionSeconds + elapsedSeconds,
@@ -445,6 +493,11 @@ function applyIncomingState(rawState, statusMessage = "") {
     elements.trackUrlInput.value = nextState.trackUrl || "";
 
     const sourceChanged = setAudioSource(nextState.trackUrl);
+
+    if (nextState.pendingCommand?.type === "play" && !nextState.isPlaying && audio.src && audio.readyState >= 1) {
+        seekAudio(nextState.pendingCommand.positionSeconds);
+    }
+
     schedulePendingCommand();
     syncPlaybackToState(sourceChanged);
 
@@ -730,6 +783,7 @@ elements.readyButton.addEventListener("click", async () => {
 
 void (async function initialize() {
     setReadyState(false);
+    detectAudioOutputLatency();
     updateButtons();
 
     backendBaseUrl = resolveBackendBaseUrl();
