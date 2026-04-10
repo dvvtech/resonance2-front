@@ -1,9 +1,9 @@
 const CLOCK_SYNC_SAMPLE_COUNT = 10;
 const CLOCK_SYNC_REFRESH_MS = 15000;
-const PLAYBACK_SYNC_INTERVAL_MS = 100;
+const PLAYBACK_SYNC_INTERVAL_MS = 250;
 const HARD_SEEK_THRESHOLD_SECONDS = 0.15;
-const SOFT_CORRECTION_THRESHOLD_SECONDS = 0.035;
-const FINE_CORRECTION_THRESHOLD_SECONDS = 0.008;
+const SOFT_CORRECTION_THRESHOLD_SECONDS = 0.04;
+const FINE_CORRECTION_THRESHOLD_SECONDS = 0.01;
 const MAX_PLAYBACK_RATE_DELTA = 0.035;
 const BACKEND_STORAGE_KEY = "resonance2:v2:backend-base-url";
 const DEFAULT_BACKEND_BASE_URL = "https://api.cloud-platform.pro/resonance/";
@@ -49,6 +49,7 @@ let audioOutputLatencyMs = 0;
 let playbackSyncHandle = null;
 let clockSyncHandle = null;
 let pendingCommandHandle = null;
+let lastPlayAttemptMs = 0;
 
 function setStatus(message) {
     if (message) {
@@ -429,9 +430,9 @@ function syncPlaybackToState(forceHardSync = false) {
 
     promotePendingCommandIfDue();
 
-    const desired = getTargetPlayback(latestRoomState);
-    const currentTime = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
-    const driftSeconds = desired.targetTime - currentTime;
+    var desired = getTargetPlayback(latestRoomState);
+    var currentTime = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+    var driftSeconds = desired.targetTime - currentTime;
 
     updateMetrics(driftSeconds);
 
@@ -442,18 +443,31 @@ function syncPlaybackToState(forceHardSync = false) {
     }
 
     if (!desired.shouldPlay) {
-        if (Math.abs(driftSeconds) > 0.05 || forceHardSync) {
-            seekAudio(desired.targetTime);
-        }
-
-        if (!audio.paused) {
+        if (!audio.paused && !audio.ended) {
             suppressPlayerEvents();
             audio.pause();
+        }
+
+        if (Math.abs(driftSeconds) > 0.1 || forceHardSync) {
+            seekAudio(desired.targetTime);
         }
 
         audio.playbackRate = 1;
         setPlaybackState(`Paused @ ${desired.targetTime.toFixed(2)}s`);
         setSyncMode(latestRoomState.pendingCommand ? `Waiting ${latestRoomState.pendingCommand.type}` : "Paused");
+        return;
+    }
+
+    if (audio.ended) {
+        if (desired.targetTime < audio.duration - 0.5) {
+            suppressPlayerEvents(600);
+            audio.currentTime = desired.targetTime;
+            void playLocalAudio();
+        } else {
+            setPlaybackState("Track ended");
+            setSyncMode("Ended");
+        }
+
         return;
     }
 
@@ -476,7 +490,8 @@ function syncPlaybackToState(forceHardSync = false) {
 
     setPlaybackState(`Playing @ ${desired.targetTime.toFixed(2)}s`);
 
-    if (audio.paused) {
+    if (audio.paused && Date.now() - lastPlayAttemptMs > 800) {
+        lastPlayAttemptMs = Date.now();
         void playLocalAudio();
     }
 }
@@ -725,6 +740,14 @@ audio.addEventListener("play", async () => {
 
 audio.addEventListener("pause", async () => {
     if (playerEventsSuppressed() || !currentRoomId || audio.ended) {
+        return;
+    }
+
+    await safeInvoke("Pause", currentRoomId);
+});
+
+audio.addEventListener("ended", async () => {
+    if (playerEventsSuppressed() || !currentRoomId) {
         return;
     }
 
